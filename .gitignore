@@ -1,0 +1,7 @@
+# Ignore system files
+.DS_store
+.ipynb_checkpoints/
+__pycache__/
+
+# Ignore example files for now 
+864691135526058843_files/
