@@ -9,39 +9,53 @@ KDTree = spatial.cKDTree
 import numpy as np
 import math
 pi = math.pi
+from collections import OrderedDict
+import os
 
-# here are the x and z ranges of the dataset 
-# maybe I should stick these in the json as well 
-x_ranges = [(570112.0, 675958.8571428572),
- (675958.8571428572, 781805.7142857143),
- (781805.7142857143, 887652.5714285714),
- (887652.5714285714, 993499.4285714286),
- (993499.4285714286, 1099346.2857142857),
- (1099346.2857142857, 1205193.1428571427),
- (1205193.1428571427, 1311040.0)]
-
-z_ranges = [(748880.0, 842260.0), (842260.0, 935640.0)]
-
-# load the up vector dictionary 
-with open('/Users/emily.joyce/Work/Repos/code_review/skeleton_keys_files/skeleton_keys_excitatory_features/polygon_creation/up_vecs.json') as json_file:
-    up_vec_dict = json.load(json_file)
+# load the up vector dictionary and x and z ranges
+# x and z ranges have been extended to span entire dataset 
+with open('./up_vecs_ranges.json') as json_file:
+    json_dict = json.load(json_file)
+    up_vec_dict = json_dict['up vecs'][0]
+    x_ranges = json_dict['x ranges']
+    z_ranges = json_dict['z_ranges']
 
 # load the layer meshes 
 # I don't like this out of a function. but it will be necessary for polygon creation 
 # so maybe this is ok? but what if someone just wants to use find_up_vec 
 # or some other function that does not need the layer meshes?
-mesh_dict={}
-for filepath in ["layer_meshes/l23","layer_meshes/l4","layer_meshes/l5","layer_meshes/l6a","layer_meshes/l6b","layer_meshes/wm"]:
-    with open(filepath,'rb') as fp:
-        verts,faces = read_precomputed_mesh(fp)
-    mesh = trimesh_io.Mesh(verts, faces)
-    filename = filepath.split('/')[1]
-    mesh_dict[filename]=mesh
-# load pia separately 
-pia_mesh = trimesh.load_mesh('layer_meshes/pia3.ply')
-mesh_dict['pia'] = pia_mesh
-mesh_dict['pia'] = trimesh_io.Mesh(mesh_dict['pia'].vertices * 1_000_000, mesh_dict['pia'].faces)
 
+
+
+# make this a function with paths as input and 
+# 
+
+def load_meshes(mesh_folder_path):
+    mesh_dict={}
+    
+    for f in os.listdir(mesh_folder_path):
+        if 'pia' in f:
+            # pia has to be loaded differently 
+            pia_mesh = trimesh.load_mesh('layer_meshes/pia3.ply')
+            mesh_dict['pia'] = pia_mesh
+            mesh_dict['pia'] = trimesh_io.Mesh(mesh_dict['pia'].vertices * 1_000_000, mesh_dict['pia'].faces)
+       
+        elif not f.startswith('.'):
+            filepath = os.path.join(mesh_folder_path, f)
+            with open(filepath,'rb') as fp:
+                verts,faces = read_precomputed_mesh(fp)
+            mesh = trimesh_io.Mesh(verts, faces)
+            filename = filepath.split('/')[1]
+            mesh_dict[filename] = mesh
+    
+    return mesh_dict
+
+# this should probably be some object that needs to be initiated - like client?
+#mesh_folder_path = input('what is the local path to the meshes you wish to use to create your polygons? ')
+mesh_dict = load_meshes(mesh_folder_path = 'layer_meshes')
+# kwarg and give it a default, or an environment variable with a default
+# class like client and all these funcs are methods on class
+# class that 
 
 def find_up_vec(x_pos, z_pos, up_vec_dictionary = up_vec_dict):
     
@@ -49,7 +63,7 @@ def find_up_vec(x_pos, z_pos, up_vec_dictionary = up_vec_dict):
     takes x and y position (nm) of a soma and returns the corresponding up 
     vector for the xz column that it falls into 
 
-    the x and z positiona are used to find the column the position falls into
+    the x and z positions are used to find the column the position falls into
     example of what these columns look like here:
     _________________________________________________________
     |       |       |       |       |       |       |       |  
@@ -59,7 +73,7 @@ def find_up_vec(x_pos, z_pos, up_vec_dictionary = up_vec_dict):
     | [0,1] | [1,1] | [2,1] | [3,1] | [4,1] | [5,1] | [6,1] | 
     |_______|_______|_______|_______|_______|_______|_______|
 
-    a list such as [2,1], is a key with a correstponding up vector as the value 
+    a list such as [2,1], is a key with a corresponding up vector as the value 
     in up_vec_dictionary 
 
     **possible future problem - it's possible that my xz range does not encompass  
@@ -112,8 +126,48 @@ def make_layer_poly(mesh_top, mesh_bottom, soma_pos, offset=1000, up_vec = np.ar
     verts_top = verts_top[::-1,:] + np.array([0,offset,0])
     verts_bot = verts_bot - np.array([0,offset,0])
     poly_verts= np.concatenate([verts_top, verts_bot])
+    # add the first vert back to the end of the array to close the loop
+    poly_verts = np.vstack([poly_verts, poly_verts[0]])
     return poly_verts
 
+def build_layer_dict(layer_name, up_vec, verts_top, verts_bottom, soma_pos, res):
+    '''
+    Creates layer polygon at a specific resoluton showing layers accross x. 
+    Returns only x and y coordinates. 
+    Adds that layer polygon and other information to a dictionary and returns that dictionary
+
+    Parameters
+    ----------
+    layer_name: str
+        the name of the layer. If minnie, will be "Layer1", "Layer2/3", "Layer4", "Layer5", "Layer6a", "Layer6b". Pia and white matter are handled with get_mesh_line function
+    up_vec: 3x1 array
+        indicates the up vector for the column in which the soma lies. use find_up_vec to find in minnie.
+    verts_top: nx3 np array 
+        array of the top mesh vertices
+    verts_bottom: nx3 np array 
+        array of the bottom mesh verts 
+    soma_pos: 3, array
+        soma position (todo: coordinates?)
+    res: float
+        resolution of the voxels (todo ?)
+
+    Returns
+    -------
+    layer_dict: dictionary 
+        dictionary formatted to be used in creation of all layer bounds for individual cells 
+    
+    '''
+
+    # create the subdict that we will later add to the full layer_dict
+    layer_dict = {}
+    # create and insert the poly 
+
+    # create and insert the poly
+    layer_poly = np.around(make_layer_poly(verts_top, verts_bottom, soma_pos = soma_pos, up_vec = up_vec)[:,0:2]/[1000*res,1000*res])
+    layer_dict['path'] = layer_poly.tolist()
+    layer_dict['name'] = layer_name    
+    layer_dict['resolution'] = res
+    return layer_dict
 
 def get_mesh_line(mesh, soma_pos, up_vec = np.array([0,-1,0])):
     up_vec = up_vec.reshape((3,))
@@ -135,6 +189,44 @@ def get_mesh_line(mesh, soma_pos, up_vec = np.array([0,-1,0])):
     cp = sk.cover_paths[0]
     verts = sk.vertices[cp]
     return verts
+
+def build_meshline_dict(layer_name, up_vec, mesh_verts, soma_pos, res, specimen_id):
+    '''
+    Creates mesh line at a specific resoluton showing mesh line cut accross x. 
+    Returns only x and y coordinates. 
+    returns a dictionary ready to be inserted into layer polygon
+
+    Parameters
+    ----------
+    layer_name: str
+        the name of the layer. If minnie, will be "Pia" or "White Matter"
+    up_vec: 3x1 array
+        indicates the up vector for the column in which the soma lies. use find_up_vec to find in minnie.
+    mesh_verts: nx3 np array 
+        array of the layer mesh vertices
+    soma_pos: 3, array
+        soma position (todo: coordinates?)
+    res: float
+        resolution of the voxels (todo ?)
+    id: int
+        numerical string that identifies the neuron for which the poly file is being made 
+
+    Returns
+    -------
+    layer_dict: dictionary 
+        dictionary formatted to be used in creation of all layer bounds for individual cells 
+    '''
+    # find the cut of mesh through line 
+    layer_poly_line = np.around(get_mesh_line(mesh_verts, soma_pos, up_vec=up_vec)[:,0:2]/[1000*res,1000*res])
+
+    # create dict to fill in 
+    layer_dict = {}
+    layer_dict['name'] = layer_name
+    layer_dict['path'] = layer_poly_line.tolist()
+    layer_dict['resolution'] = res
+    layer_dict['biospecimen_id'] = specimen_id
+
+    return layer_dict
 
 
 def calculate_soma_poly(soma_loc, n, radius):
@@ -160,7 +252,7 @@ def calculate_soma_poly(soma_loc, n, radius):
     return np.array([(math.cos(2*pi/n*x)*radius + soma_loc[0], math.sin(2*pi/n*x)*radius + soma_loc[2]) for x in range(0,n)])
     
   
-def make_poly_file(soma_pos, specimen_id, n_soma_circ_pts = 65, soma_rad = 2500, res = 0.3603):
+def make_poly_file(mesh_dict, soma_pos, specimen_id, n_soma_circ_pts = 65, soma_rad = 2500, res = 0.3603):
     
     '''
     creates the polygon file that is needed to create layer aligned neurons in the skeleton keys repository 
@@ -169,6 +261,8 @@ def make_poly_file(soma_pos, specimen_id, n_soma_circ_pts = 65, soma_rad = 2500,
 
     Parameters
     ----------
+    mesh_dict: dict
+        dictionary contianing the meshes to be used to create layer bounds
     soma_pos: (3,) array like object 
         soma coordinates of a given neuron
     specimen_id: int
@@ -189,98 +283,41 @@ def make_poly_file(soma_pos, specimen_id, n_soma_circ_pts = 65, soma_rad = 2500,
     # create the empty poly dict to be filled
     poly_dict = {}
     # create empty sub dicts/lists which will be filled then entered into poly dict
-    pia_dict = {}
-    wm_dict = {}
-    soma_dict = {}
-    layer_polygons_list = []
-    # create the layer polygons subdicts 
-    layer1_dict = {}
-    layer2_3_dict = {}
-    layer4_dict = {}
-    layer5_dict = {}
-    layer6a_dict = {}
-    layer6b_dict = {}
 
     # find the up vector for the given soma location  
     up_vec = np.array(find_up_vec(soma_pos[0], soma_pos[2]))
     
     # calculate layer vertices for the given soma location, taking into account the up vector for that area
-    # this could be a loop... pia and wm in a loop and all layers in another 
-    pia_verts = np.around(get_mesh_line(mesh_dict['pia'], soma_pos, up_vec=up_vec)[:,0:2]/[1000*res,1000*res])
-    lay1verts = np.around(make_layer_poly(mesh_dict['pia'], mesh_dict['l23'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    lay23verts = np.around(make_layer_poly(mesh_dict['l23'], mesh_dict['l4'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    lay4verts = np.around(make_layer_poly(mesh_dict['l4'], mesh_dict['l5'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    lay5verts = np.around(make_layer_poly(mesh_dict['l5'], mesh_dict['l6a'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    lay6averts = np.around(make_layer_poly(mesh_dict['l6a'], mesh_dict['l6b'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    lay6bverts = np.around(make_layer_poly(mesh_dict['l6b'], mesh_dict['wm'], up_vec=up_vec, soma_pos = soma_pos)[:,0:2]/[1000*res,1000*res])
-    wm_verts = np.around(get_mesh_line(mesh_dict['wm'], soma_pos, up_vec=up_vec)[:,0:2]/[1000*res,1000*res])
+    # start with l1, l23, l4, l5, l6a, l6b
+    layers = ['pia', 'l23', 'l4', 'l5', 'l6a','l6b','wm']
+    layer_names = ['Layer1', 'Layer2/3', 'Layer4', 'Layer5', 'Layer6a', 'Layer6b']
+    # we will put these dicts into a list
+    layer_polygons_list = []
+    for i in range(len(layer_names)):
+        # insert the poly info into poly_dict['layer_polygons']
+        layer_polygon = build_layer_dict(layer_names[i], up_vec, mesh_dict[layers[i]], mesh_dict[layers[i+1]], soma_pos, res)
+        layer_polygons_list.append(layer_polygon)
+    # this polygon list will be appended to the poly_dict at the end!
+
+    # now to create mesh lines for pia and white matter and insert them into poly_dict
+    # redefine layers and layer names 
+    layers = ['pia', 'wm']
+    layer_names = ['Pia', 'White Matter']
+    for i in range(len(layers)):
+        dict_key = layers[i] + '_path'
+        poly_dict[dict_key] = build_meshline_dict(layer_names[i], up_vec, mesh_dict[layers[i]], soma_pos, res, specimen_id)
     
-    # these could also be loops 
-    # fill out pia dict
-    pia_dict['name'] = "Pia"
-    pia_dict['path'] = pia_verts.tolist()
-    pia_dict['resolution'] = res
-    pia_dict['biospecimen_id'] = specimen_id
-    # insert pia dict into main poly dict 
-    poly_dict['pia_path'] = pia_dict
-    
-    # fill out white matter dict 
-    wm_dict['name'] = "White Matter"
-    wm_dict['path'] = wm_verts.tolist()
-    wm_dict['resolution'] = res
-    wm_dict['biospecimen_id'] = specimen_id
-    # insert wm_dict to poly_dict
-    poly_dict['wm_path'] = pia_dict
-    
-    # now do the soma path 
+    # draw a circle around the soma and add that to poly_dict
+    soma_dict = {}
     soma_dict['name'] = "Soma"
     soma_dict['path'] = np.around(calculate_soma_poly(soma_pos, n_soma_circ_pts, soma_rad)/[1000*res,1000*res]).tolist()
     soma_dict['resolution'] = res
     soma_dict['biospecimen_id'] = specimen_id 
     soma_dict['center'] =  [soma_pos[0], soma_pos[2]]
-    # insert to larger dict
     poly_dict['soma_path'] = soma_dict
-    
-    # now fill out the larger layer_polygons_dict
-    # layer by layer 
-    # these should be loops too 
-    layer1_dict['path'] = lay1verts.tolist()
-    layer1_dict['name'] = 'Layer1'
-    layer1_dict['resolution'] = res
-    
-    layer2_3_dict['path'] = lay23verts.tolist()
-    layer2_3_dict['name'] = 'Layer2/3'
-    layer2_3_dict['resolution'] = res
-    
-    layer4_dict['path'] = lay4verts.tolist()
-    layer4_dict['name'] = 'Layer4'
-    layer4_dict['resolution'] = res
 
-    layer5_dict['path'] = lay5verts.tolist()
-    layer5_dict['name'] = 'Layer5'
-    layer5_dict['resolution'] = res
-
-    layer6a_dict['path'] = lay6averts.tolist()
-    layer6a_dict['name'] = 'Layer6a'
-    layer6a_dict['resolution'] = res
-    
-    layer6b_dict['path'] = lay6bverts.tolist()
-    layer6b_dict['name'] = 'Layer6b'
-    layer6b_dict['resolution'] = res
-    
-    #insert all of the above into layer_polygons_list
-    layer_polygons_list.append(layer1_dict)
-    layer_polygons_list.append(layer2_3_dict)
-    layer_polygons_list.append(layer4_dict)
-    layer_polygons_list.append(layer5_dict)
-    layer_polygons_list.append(layer6a_dict)
-    layer_polygons_list.append(layer6b_dict)
-
-    # insert the layer_polygons_list into poly_dict
+    # finally insert layer_polygons_list to poly_dict
     poly_dict['layer_polygons'] = layer_polygons_list
 
     return poly_dict
-    
-    
-    
     
